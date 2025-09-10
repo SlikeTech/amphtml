@@ -457,5 +457,16 @@
         </div>
       </div>
     </div>
+
+    <script>
+      events = ['cplPlayerReady', 'cplVideoTimeUpdate', 'cplAdProgress'];
+      events.forEach((event) => {
+        document
+          .getElementById('main-player')
+          .addEventListener(event, (details) => {
+            console.log(event, details.data);
+          });
+      });
+    </script>
   </body>
 </html>

@@ -16,7 +16,6 @@ import {
   createFrameFor,
   isJsonOrObj,
   objOrParseJson,
-  redispatch,
 } from '../../../src/iframe-video';
 import {VideoEvents_Enum} from '../../../src/video-interface';
 
@@ -27,29 +26,9 @@ const TAG = 'amp-slikeplayer';
  */
 
 /**
- @enum {string}
+ * @enum {string}
  * @private
  */
-
-const CleoEvent = {
-  'ready': VideoEvents_Enum.LOAD,
-  'play': VideoEvents_Enum.PLAYING,
-  'pause': VideoEvents_Enum.PAUSE,
-  'complete': VideoEvents_Enum.ENDED,
-  'visible': VideoEvents_Enum.VISIBILITY,
-  'seeked': VideoEvents_Enum.SEEKED,
-  'seeking': VideoEvents_Enum.SEEKING,
-  'adStart': VideoEvents_Enum.AD_START,
-  'adEnd': VideoEvents_Enum.AD_END,
-  'adPlay': VideoEvents_Enum.AD_PLAY,
-  'adPause': VideoEvents_Enum.AD_PAUSE,
-  'adSkip': VideoEvents_Enum.AD_SKIP,
-  'adComplete': VideoEvents_Enum.AD_END,
-  'adError': VideoEvents_Enum.AD_ERROR,
-  'adLoaded': VideoEvents_Enum.AD_LOADED,
-  'adImpression': VideoEvents_Enum.AD_IMPRESSION,
-  'adClick': VideoEvents_Enum.AD_CLICK,
-};
 
 export class AmpSlikeplayer extends AMP.BaseElement {
   /** @param {!AmpElement} element */
@@ -78,7 +57,7 @@ export class AmpSlikeplayer extends AMP.BaseElement {
     this.onReadyOnce_ = once((detail) => this.onReady_(detail));
 
     /** @private {string} */
-    this.config_ = null;
+    this.config_ = '';
 
     /** @private {string} */
     this.poster_ = '';
@@ -100,6 +79,9 @@ export class AmpSlikeplayer extends AMP.BaseElement {
 
     /** @private {number} 0..1 */
     this.viewportVisibleThreshold_ = 0;
+
+    /** @private {string} */
+    this.targetOrigin_ = '*';
   }
 
   /** @override */
@@ -127,25 +109,7 @@ export class AmpSlikeplayer extends AMP.BaseElement {
     this.poster_ = element.getAttribute('poster') || '';
 
     // Read optional viewport visibility threshold from data-config
-    if (this.config_) {
-      try {
-        const params = new URLSearchParams(this.config_);
-        if (params.has('viewport')) {
-          let threshold = parseFloat(
-            /** @type {string} */ (params.get('viewport'))
-          );
-          if (isFinite(threshold)) {
-            if (threshold > 1) {
-              threshold = threshold / 100; // percent -> ratio
-            }
-            this.viewportVisibleThreshold_ = Math.max(
-              0,
-              Math.min(1, threshold)
-            );
-          }
-        }
-      } catch {}
-    }
+    this.parseViewportThreshold_();
 
     installVideoManagerForDoc(element);
     const videoManager = Services.videoManagerForDoc(element);
@@ -180,11 +144,7 @@ export class AmpSlikeplayer extends AMP.BaseElement {
 
   /** @override */
   layoutCallback() {
-    let src = `${this.baseUrl_}#apikey=${this.apikey_}&videoid=${this.videoid_}&baseurl=${this.win.location.origin}`;
-
-    if (this.config_) {
-      src = `${this.baseUrl_}#apikey=${this.apikey_}&videoid=${this.videoid_}&${this.config_}&baseurl=${this.win.location.origin}`;
-    }
+    const src = this.buildIframeSrc_();
 
     const frame = disableScrollingOnIframe(
       createFrameFor(this, src, this.element.id)
@@ -252,11 +212,7 @@ export class AmpSlikeplayer extends AMP.BaseElement {
    * @private
    */
   onMessage_(messageEvent) {
-    if (
-      !this.iframe_ ||
-      !messageEvent ||
-      messageEvent.source != this.iframe_.contentWindow
-    ) {
+    if (!this.isValidMessage_(messageEvent)) {
       return;
     }
 
@@ -268,52 +224,14 @@ export class AmpSlikeplayer extends AMP.BaseElement {
     const data = objOrParseJson(messageData);
     const event = data['event'];
     const detail = data['detail'];
+
     if (event === 'ready') {
       detail && this.onReadyOnce_(detail);
       return;
     }
     const {element} = this;
-    if (redispatch(element, event, CleoEvent)) {
-      return;
-    }
-    if (detail && event) {
-      switch (event) {
-        case 'fullscreen':
-          break;
-        case 'meta':
-          break;
-        case 'mute':
-          break;
-        case 'playedRanges':
-          break;
-        case 'time':
-          const {currentTime} = detail;
-          this.currentTime_ = currentTime;
-          break;
-        case 'adTime':
-          const {position} = detail;
-          this.currentTime_ = position;
-          break;
-        case 'seeked':
-        case 'seeking':
-          // Seek events are handled by the redispatch above
-          break;
-        case 'adStart':
-        case 'adEnd':
-        case 'adPlay':
-        case 'adPause':
-        case 'adSkip':
-        case 'adComplete':
-        case 'adError':
-        case 'adLoaded':
-        case 'adImpression':
-        case 'adClick':
-          // Ad events are handled by the redispatch above
-          break;
-        default:
-          break;
-      }
-    }
+    this.handleEventDetail_(event, detail);
+    dispatchCustomEvent(element, event, detail);
   }
   /**
    * @override
@@ -364,13 +282,12 @@ export class AmpSlikeplayer extends AMP.BaseElement {
 
   /** @override */
   getCurrentTime() {
-    // Not supported.
-    return this.currentTime_ || 0;
+    return this.currentTime_;
   }
 
   /** @override */
   getDuration() {
-    return this.duration_ || 1;
+    return this.duration_;
   }
 
   /** @override */
@@ -384,7 +301,7 @@ export class AmpSlikeplayer extends AMP.BaseElement {
   }
   /**
    * @param {string} method
-   * @param {string} [optParams]
+   * @param {*} [optParams]
    * @private
    */
   postMessage_(method, optParams) {
@@ -397,7 +314,7 @@ export class AmpSlikeplayer extends AMP.BaseElement {
           'method': method,
           'optParams': optParams,
         }),
-        '*'
+        this.targetOrigin_
       );
     });
   }
@@ -422,6 +339,125 @@ export class AmpSlikeplayer extends AMP.BaseElement {
   /** @override */
   pauseCallback() {
     this.pause();
+  }
+
+  /**
+   * @private
+   * @return {string}
+   */
+  buildIframeSrc_() {
+    this.setTargetOrigin_();
+
+    const params = this.buildUrlParams_();
+    return `${this.baseUrl_}#${params.join('&')}`;
+  }
+
+  /**
+   * @private
+   */
+  setTargetOrigin_() {
+    try {
+      const url = new URL(this.baseUrl_);
+      this.targetOrigin_ = url.origin;
+    } catch {
+      // Keep default target origin
+    }
+  }
+
+  /**
+   * @private
+   * @return {!Array<string>}
+   */
+  buildUrlParams_() {
+    const params = [
+      `apikey=${encodeURIComponent(this.apikey_)}`,
+      `videoid=${encodeURIComponent(this.videoid_)}`,
+    ];
+
+    const extra = this.normalizeConfig_();
+    if (extra) {
+      params.push(extra);
+    }
+
+    const origin = this.win.location?.origin;
+    if (origin) {
+      params.push(`baseurl=${encodeURIComponent(origin)}`);
+    }
+
+    return params;
+  }
+
+  /**
+   * @private
+   * @return {string}
+   */
+  normalizeConfig_() {
+    return (this.config_ || '').trim().replace(/^[#?&]+/, '');
+  }
+
+  /**
+   * @private
+   */
+  parseViewportThreshold_() {
+    if (!this.config_) {
+      return;
+    }
+
+    try {
+      const params = new URLSearchParams(this.config_);
+      if (!params.has('viewport')) {
+        return;
+      }
+
+      let threshold = parseFloat(params.get('viewport'));
+      if (!isFinite(threshold)) {
+        return;
+      }
+
+      // Convert percentage to ratio if needed
+      if (threshold > 1) {
+        threshold = threshold / 100;
+      }
+
+      this.viewportVisibleThreshold_ = Math.max(0, Math.min(1, threshold));
+    } catch {
+      // Ignore parsing errors
+    }
+  }
+
+  /**
+   * @private
+   * @param {*} messageEvent
+   * @return {boolean}
+   */
+  isValidMessage_(messageEvent) {
+    return !!(
+      this.iframe_ &&
+      messageEvent &&
+      messageEvent.source === this.iframe_.contentWindow
+    );
+  }
+
+  /**
+   * @private
+   * @param {string} event
+   * @param {*} detail
+   */
+  handleEventDetail_(event, detail) {
+    if (!detail || !event) {
+      return;
+    }
+
+    switch (event) {
+      case 'cplVideoTimeUpdate':
+        this.currentTime_ = detail.currentTime || 0;
+        break;
+      case 'cplAdProgress':
+        this.currentTime_ = detail.position || 0;
+        break;
+      default:
+        break;
+    }
   }
 }
 
